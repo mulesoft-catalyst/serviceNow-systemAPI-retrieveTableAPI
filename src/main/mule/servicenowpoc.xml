@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core" xmlns:http="http://www.mulesoft.org/schema/mule/http"
+	xmlns="http://www.mulesoft.org/schema/mule/core"
+	xmlns:doc="http://www.mulesoft.org/schema/mule/documentation" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+	<http:request-config name="HTTP_Request_configuration" doc:name="HTTP Request configuration" doc:id="870dafd8-1b25-4caa-acd2-141ac5251dfb" >
+		<http:request-connection protocol="HTTPS" host="${serviceNow.host}" port="${serviceNow.port}" >
+			<http:authentication >
+				<http:basic-authentication username="${serviceNow.userid}" password="${serviceNow.password}" />
+			</http:authentication>
+		</http:request-connection>
+	</http:request-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="2a748156-d937-43c4-90dd-17921ad29fbf" file="serviceNow-poc.properties" />
+	<http:listener-config name="HTTP_Listener_config" doc:name="HTTP Listener config" doc:id="2e8cdbdf-7184-4b95-8872-dfa560350e40" >
+		<http:listener-connection host="0.0.0.0" port="8081" />
+	</http:listener-config>
+	<configuration-properties doc:name="Configuration properties" doc:id="92366dee-8086-4505-852c-a7a53db017d2" file="local.properties" />
+	<flow name="serviceNow-RetrieveTableData" doc:id="206647b1-0ffa-4906-8d0a-99de615c0af3" >
+		<http:listener doc:name="Listener" doc:id="140b46f6-626e-4960-b769-c80d4515e9c5" config-ref="HTTP_Listener_config" path="/retreiveTableData"/>
+		<async doc:name="Async" doc:id="6e49d922-cdd1-42b8-b224-6285b05478c3" >
+			<logger level="INFO" doc:name="Logger" doc:id="44f9783d-c2ee-4b4e-99ef-6425d1da4f52" message="Received request to Retrieve Data from serviceNow Table API"/>
+		</async>
+		<set-variable value="#[p('serviceNow.tableApi.query' default '') ++ '=' ++ (message.attributes.queryParams.'id' default '')]" doc:name="dynamicQuery - Can be customized as needed by Customer" doc:id="b5801b1d-0ee0-4849-a87d-664ece982c87" variableName="dynamicQuery"/>
+		<ee:transform doc:name="Preparing the buffer Payload and  forming the URL for ServiceNow 1st Hit" doc:id="0ec0354b-b0b1-40db-b040-bc205dc910cf" >
+			<ee:message >
+			</ee:message>
+			<ee:variables >
+				<ee:set-variable variableName="nextlink" ><![CDATA[%dw 2.0
+output application/json
+---
+(p('serviceNow.baseUri') default '') ++ '/' ++ (p('serviceNow.tableApi.tableName') default '') ++ '?' ++ 'sysparm_fields=' ++ (p('serviceNow.tableApi.sysparm_fields') default '') ++ '&' ++ 'sysparm_limit=' ++ (p('serviceNow.tableApi.initial.sysparm_limit') default '') ++ '&' ++ 'sysparm_offset=' ++ (p('serviceNow.tableApi.initial.sysparm_offset') default '')]]></ee:set-variable>
+				<ee:set-variable variableName="bufferPayload" ><![CDATA[%dw 2.0
+output application/java
+---
+[]]]></ee:set-variable>
+			</ee:variables>
+		</ee:transform>
+		<http:request method="GET" doc:name="1st hit to ServiceNow using the Initial Offset-limit values" doc:id="d14e891c-0656-44bd-b669-9ec27de32d3d" config-ref="HTTP_Request_configuration" sendCorrelationId="ALWAYS" correlationId="#[correlationId]" path="#[vars.nextlink]">
+			<http:query-params><![CDATA[#[output application/java
+---
+{
+	"sysparm_query" : vars.dynamicQuery
+}]]]></http:query-params>
+		</http:request>
+		<set-variable value="#[%dw 2.0
+import * from dw::core::Strings
+output application/json
+---
+
+(substringBeforeLast(if ((message.attributes.headers.'X-Total-Count')/p('serviceNow.tableApi.initial.sysparm_limit') as String contains '.') ((message.attributes.headers.'X-Total-Count')/p('serviceNow.tableApi.initial.sysparm_limit')+1) else '', '.') as Number) - 1]" doc:name="Calculating IterationCount based on Return total count from 1st  hit to ServiceNow" doc:id="f83a76c9-457c-4c0c-bb25-089784d4ac26" variableName="iterationCount" />
+		<set-variable value="#[%dw 2.0 
+output application/json
+fun prepareList(list:Array, maxSize: Number) = if(sizeOf(list) &gt;= maxSize )
+list
+else
+prepareList(list ++ [(sizeOf(list) + 1) as Number],maxSize)
+---
+prepareList([],vars.iterationCount)]" doc:name="DummyArrayCreationToRunThrough For loop" doc:id="e7f75374-1b00-41ec-a2c0-69c81ddd17f8" variableName="collectioniterations" />
+		<ee:transform doc:name="This is the NEXT URL which is received from 1st Iteration" doc:id="b6fb585c-2eea-40b5-ae64-dd178161d4b6">
+								<ee:message>
+								</ee:message>
+								<ee:variables>
+									<ee:set-variable variableName="nextlink"><![CDATA[%dw 2.0
+import * from dw::core::Strings
+output application/json
+---
+substringAfterLast(substringBefore(attributes.headers.'link', '>;rel="next"'), '",<')]]></ee:set-variable>
+								</ee:variables>
+							</ee:transform>
+		<set-variable value="#[%dw 2.0 
+output application/java 
+--- 
+vars.bufferPayload &lt;&lt; payload.result]" doc:name="Adding the 1st payload into the Buffer Payload" doc:id="0b48e9db-2390-4642-89e4-115b5cdbd27a" variableName="bufferPayload"/>
+		<foreach doc:name="For Each - Go On Adding response Payload and Mapping the NEXT URL into Variable" doc:id="766008f9-ccc5-4f46-ac59-374e4ae9078b" collection="#[vars.collectioniterations]">
+			<http:request method="GET" doc:name="ServiceNow-next" doc:id="72610f6a-7317-47da-8af6-f44a30e46220" config-ref="HTTP_Request_configuration" url="#[vars.nextlink]" sendCorrelationId="ALWAYS" correlationId="#[correlationId]" >
+				<http:query-params ><![CDATA[#[output application/java
+---
+{
+	"sysparm_query" : vars.dynamicQuery
+}]]]></http:query-params>
+			</http:request>
+			<ee:transform doc:name="bufferPayload" doc:id="111c0998-b333-4ed0-bd93-97e0cf9b2317">
+			<ee:message>
+			</ee:message>
+								<ee:variables>
+				<ee:set-variable variableName="bufferPayload"><![CDATA[%dw 2.0
+output application/java
+---
+vars.bufferPayload << payload.result]]></ee:set-variable>
+								</ee:variables>
+		</ee:transform>
+			<ee:transform doc:name="nextLink" doc:id="10aa167f-3b76-4898-9124-328970a3ebd3" >
+				<ee:message />
+				<ee:variables >
+					<ee:set-variable variableName="nextlink" ><![CDATA[%dw 2.0
+import * from dw::core::Strings
+output application/json
+---
+substringAfterLast(substringBefore(attributes.headers.'link', '>;rel="next"'), '",<')]]></ee:set-variable>
+				</ee:variables>
+			</ee:transform>
+		</foreach>
+		<set-payload value="#[output application/json
+---
+
+vars.bufferPayload[0]]" doc:name="Collated Payload" doc:id="4f98c5d1-e774-4799-b498-58d329b5652c" />
+		<async doc:name="Async" doc:id="10b57c26-9f38-493e-8523-0aeefc95ff7f" >
+			<logger level="INFO" doc:name="Logger" doc:id="2a774555-3750-422d-8bb9-e0579abb168b" message="Retrieval From ServiceNow Table Completed
+---
+
+vars.bufferPayload" />
+		</async>
+	</flow>
+</mule>
